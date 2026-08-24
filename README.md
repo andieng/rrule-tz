@@ -15,8 +15,7 @@ rule.firstExecutionUTC();
 //=> 2026-02-11T08:00:00.000Z   (same result everywhere, regardless of host timezone)
 ```
 
-> [!NOTE]
-> This release covers **occurrence queries only** (`betweenUTC`, `allUTC`, `firstExecutionUTC`, etc.). Immutable rule editing (`excludeDate`, `moveStartAfter`, `moveUntilBefore`) and cross-timezone rule conversion (`convertToTimezone`) aren't in this release yet — see [Roadmap](#roadmap).
+> **Note:** This release covers **occurrence queries only** (`betweenUTC`, `allUTC`, `firstExecutionUTC`, etc.). Immutable rule editing (`excludeDate`, `moveStartAfter`, `moveUntilBefore`) and cross-timezone rule conversion (`convertToTimezone`) aren't in this release yet — see [Roadmap](#roadmap).
 
 ## Contents
 
@@ -53,8 +52,7 @@ rule.betweenUTC(new Date('2026-02-11T00:00:00Z'), new Date('2026-02-13T00:00:00Z
 
 All of the above is **independent of the host machine's timezone** — the same code returns the same UTC instants whether it runs on a laptop set to `Europe/Berlin` or a server set to `UTC`. Plain `rrule` does not give you that guarantee; see [the problem this fixes](#the-problem-this-fixes) below.
 
-> [!NOTE]
-> **What this package does _not_ fix: the DST fold hour.** During a fall-back DST transition, a local wall-clock time occurs twice. In `Europe/Berlin` on 2026-10-25, clocks jump back from 03:00 CEST to 02:00 CET, so **02:00–03:00 local happens twice** — 02:30 is both `00:30Z` and `01:30Z`. Round-tripping a `Date` through a floating (timezone-mislabeled) representation during that hour is inherently ambiguous: no timezone library can losslessly resolve it, and this package doesn't pretend to. Avoid scheduling recurrence rules with `DTSTART`/occurrences that land in the repeated hour.
+> **Note:** this package does **not** fix the DST fold hour. During a fall-back DST transition, a local wall-clock time occurs twice. In `Europe/Berlin` on 2026-10-25, clocks jump back from 03:00 CEST to 02:00 CET, so **02:00–03:00 local happens twice** — 02:30 is both `00:30Z` and `01:30Z`. Round-tripping a `Date` through a floating (timezone-mislabeled) representation during that hour is inherently ambiguous: no timezone library can losslessly resolve it, and this package doesn't pretend to. Avoid scheduling recurrence rules with `DTSTART`/occurrences that land in the repeated hour.
 
 ## The problem this fixes
 
