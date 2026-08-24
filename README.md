@@ -30,23 +30,7 @@ Every function shipped here survived 4 rounds of adversarial code review with no
 npm install rrule-tz rrule
 ```
 
-`rrule` is a peer dependency — rrule-tz is an add-on layered on top of it, not a replacement. Your app and rrule-tz share the one `rrule` install (no duplicated copy on disk), and the `RRule`/`RRuleSet` objects that rrule-tz hands back are instances of that same shared module, so `instanceof` checks against your own `rrule` imports keep working.
-
-> [!WARNING]
-> **If you link this package locally** (`npm link`, or `"rrule-tz": "file:../rrule-tz"`), that guarantee breaks. Node resolves rrule-tz's `rrule` import against _its own_ `node_modules` rather than yours, so two live copies of `rrule` exist. Objects built by one are unrecognized by the other, which surfaces as corrupted output rather than a clear error:
->
-> ```
-> RRULE:FREQ=WEEKLY;BYDAY=undefined,undefined,undefined
->                         ^ Weekday objects from copy A, serialized by copy B
-> ```
->
-> Point both at a single copy. For Jest:
->
-> ```ts
-> moduleNameMapper: { '^rrule$': '<rootDir>/node_modules/rrule' }
-> ```
->
-> A normal registry install is unaffected — the published package ships only `dist/`, with no bundled `rrule`.
+`rrule` is a peer dependency, so the `RRule`/`RRuleSet` objects rrule-tz hands back are instances of your own `rrule` install — `instanceof` checks against it keep working.
 
 ## Quick start
 
