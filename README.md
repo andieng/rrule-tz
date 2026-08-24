@@ -3,7 +3,7 @@
 Timezone-safe query ergonomics on top of [`rrule`](https://github.com/jkbrzt/rrule). `rrule` is a solid RFC 5545 implementation, but querying a `TZID` rule's occurrences silently depends on the host machine's own timezone rather than the rule's. `rrule-tz` wraps it to fix that specifically.
 
 > [!NOTE]
-> This release covers **occurrence queries only** (`betweenUTC`, `allUTC`, `firstExecutionUTC`, etc.) — the surface that's been hardened against 4 rounds of adversarial review and is verified across 6 host timezones. Immutable rule editing (`excludeDate`, `moveStartAfter`, `moveUntilBefore`) and cross-timezone rule conversion (`convertToTimezone`) are still under active hardening on a separate branch and aren't in this release — see [Roadmap](#roadmap).
+> This release covers **occurrence queries only** (`betweenUTC`, `allUTC`, `firstExecutionUTC`, etc.) — the surface that's been hardened against 4 rounds of adversarial review and is verified in CI under 4 real host timezones. Immutable rule editing (`excludeDate`, `moveStartAfter`, `moveUntilBefore`) and cross-timezone rule conversion (`convertToTimezone`) are still under active hardening on a separate branch and aren't in this release — see [Roadmap](#roadmap).
 
 ## Install
 
@@ -66,7 +66,7 @@ const set = rrulestr('DTSTART;TZID=Europe/Berlin:20260211T090000\nRRULE:FREQ=DAI
 set.between(new Date('2026-02-10T00:00:00Z'), new Date('2026-02-12T00:00:00Z'), true);
 ```
 
-`RRuleTZ.betweenUTC()` (and `allUTC`, `firstExecutionUTC`, `lastExecutionUTC`, `nextOccurrence`, `prevOccurrence`) take true UTC instants in, and return true UTC instants out — independent of the host machine's timezone, verified by tests that fake the system timezone across six different zones, including fractional offsets (+05:30, +12:45).
+`RRuleTZ.betweenUTC()` (and `allUTC`, `firstExecutionUTC`, `lastExecutionUTC`, `nextOccurrence`, `prevOccurrence`) take true UTC instants in, and return true UTC instants out — independent of the host machine's timezone. Verified by tests that fake the system timezone across five zones, plus CI running the whole suite under `UTC`, `America/New_York`, `Pacific/Kiritimati` (+14:00) and `Asia/Kathmandu` (+05:45) with a real `TZ` set, not a mock.
 
 ### No built-in IANA timezone validation
 
@@ -87,6 +87,7 @@ import {
   getLocalTimeInUtc,
   getUtcTimeFromLocal,
   isValidTimezone,
+  machineLocalTz,
 } from 'rrule-tz';
 ```
 
@@ -197,6 +198,10 @@ Whether `tzid` is a valid IANA timezone name (e.g. `"Europe/Berlin"`, not `"CET"
 ### `getLocalTimeInUtc(tzid: string, date: Date): Date` / `getUtcTimeFromLocal(tzid: string, date: Date): Date`
 
 Low-level conversions between a true UTC instant and its "floating" wall-clock digits (a `Date` whose UTC-labeled fields are actually `tzid`'s local time) — the primitives `RRuleTZ` builds on. Most usage should reach for `RRuleTZ`'s methods instead; these are exported for building your own extensions (see below).
+
+### `machineLocalTz(): string`
+
+The host machine's own IANA system timezone, resolved fresh on every call rather than cached — `RRuleTZ` uses this internally so a `TZ` change after import (routine in test setups) is always picked up. Exported for the same reason as the two functions above: building your own extensions.
 
 ## Known limitations
 
