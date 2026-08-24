@@ -8,6 +8,10 @@ function isRuleBounded(opts: Partial<Options>): boolean {
   return opts.count != null || opts.until != null;
 }
 
+/** JS's actual Date range boundaries, used as unbounded search anchors for first/lastExecutionUTC. */
+const MIN_DATE = new Date(-8640000000000000);
+const MAX_DATE = new Date(8640000000000000);
+
 /** rrulestr's options, minus forceset - RRuleTZ always parses into a set. */
 type RRuleTZParseOptions = Omit<NonNullable<Parameters<typeof rrulestr>[1]>, 'forceset'>;
 
@@ -18,8 +22,9 @@ export class RRuleTZ {
     const str = typeof rule === 'string' ? rule : rule.toString();
     try {
       this._rruleSet = rrulestr(str, { ...options, forceset: true }) as RRuleSet;
-    } catch {
-      throw new RRuleTZError(`Invalid rrule string: ${str}`);
+    } catch (cause) {
+      const reason = cause instanceof Error ? cause.message : String(cause);
+      throw new RRuleTZError(`Invalid rrule string: ${str}\nReason: ${reason}`);
     }
 
     // A DTSTART+RDATE-only set parses fine and answers queries, but the `rrule` getter throws, which
@@ -112,7 +117,7 @@ export class RRuleTZ {
     // Anchored at the minimum representable date, not the epoch - a pre-1970 DTSTART would
     // otherwise report the first occurrence after 1970 as if it were the first overall, which also
     // made occurrencePosition() call the real first occurrence MIDDLE. Mirrors lastExecutionUTC().
-    const firstExecLocalTime = this.rruleSet.after(new Date(-8640000000000000), true);
+    const firstExecLocalTime = this.rruleSet.after(MIN_DATE, true);
     if (!firstExecLocalTime) return null;
 
     return this.utcFromHostFloating(firstExecLocalTime);
@@ -124,7 +129,7 @@ export class RRuleTZ {
     const allBounded = this.rruleSet.rrules().every(rule => isRuleBounded(rule.origOptions));
     if (!allBounded) return null;
 
-    const lastExecLocalTime = this.rruleSet.before(new Date(8640000000000000), true);
+    const lastExecLocalTime = this.rruleSet.before(MAX_DATE, true);
     if (!lastExecLocalTime) return null;
 
     return this.utcFromHostFloating(lastExecLocalTime);

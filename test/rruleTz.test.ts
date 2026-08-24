@@ -17,6 +17,17 @@ describe('RRuleTZ', () => {
       // If COUNT were lost, the rule would be infinite and allUTC() would throw.
       expect(rule.allUTC().map(date => date.toISOString())).toEqual(['2026-02-11T08:00:00.000Z']);
     });
+
+    it("preserves rrulestr's specific parse error instead of a generic message (code review finding)", () => {
+      try {
+        RRuleTZ.init('DTSTART:20260211T090000Z\nRRULE:FREQ=DAILY;BOGUSPARAM=5');
+        expect.unreachable('expected RRuleTZ.init to throw');
+      } catch (e) {
+        expect(e).toBeInstanceOf(RRuleTZError);
+        expect((e as RRuleTZError).message).toContain('Reason:');
+        expect((e as RRuleTZError).message.toLowerCase()).toContain('bogusparam');
+      }
+    });
   });
 
   describe('subclassing (the "build your own extension" path the README documents)', () => {

@@ -189,7 +189,11 @@ The host machine's own IANA system timezone, resolved fresh on every call rather
 
 ## Known limitations
 
-The DST fold hour, covered in the callout near the top: during a fall-back transition a local wall-clock time occurs twice, so a floating representation of it maps to two different instants with nothing to disambiguate them. No library can resolve this; avoid scheduling into the repeated hour.
+**The DST fold hour**, covered in the callout near the top: during a fall-back transition a local wall-clock time occurs twice, so a floating representation of it maps to two different instants with nothing to disambiguate them. No library can resolve this; avoid scheduling into the repeated hour.
+
+**Sub-second precision is dropped when constructing from an `RRule`/`RRuleSet` instance.** `RRuleTZ.init()` always round-trips through the iCalendar string format internally, and RFC 5545's `DTSTART`/`RDATE`/`EXDATE` value types have no sub-second component — `rrule`'s own serializer truncates to whole seconds. This is inherent to the string representation, not specific to this package: constructing from a string (the common case) never had milliseconds to lose in the first place.
+
+**`RDATE`/`EXDATE` lines with a `TZID` different from `DTSTART`'s are silently reinterpreted using `DTSTART`'s zone.** This is an `rrule` parsing limitation, not one introduced here — the per-line `TZID` is discarded at parse time rather than used to compute the instant, so `EXDATE;TZID=America/New_York:...` on a `DTSTART;TZID=Europe/Berlin` rule excludes the wrong UTC instant with no error. Always give every `RDATE`/`EXDATE` line the same `TZID` as `DTSTART` (or none, for a UTC/floating rule).
 
 ## Building app-specific extensions
 

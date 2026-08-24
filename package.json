@@ -4,6 +4,14 @@
   "description": "Timezone-safe wrapper around rrule — true-UTC occurrence queries, independent of the host machine's timezone.",
   "license": "MIT",
   "author": "Thuy Nguyen",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andieng/rrule-tz.git"
+  },
+  "bugs": {
+    "url": "https://github.com/andieng/rrule-tz/issues"
+  },
+  "homepage": "https://github.com/andieng/rrule-tz#readme",
   "keywords": [
     "rrule",
     "recurrence",
