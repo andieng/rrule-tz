@@ -1,0 +1,9 @@
+node_modules
+dist
+coverage
+*.log
+.DS_Store
+
+# Internal working notes - not part of the published package or its history
+ISSUES.md
+REVIEW-FINDINGS.md
