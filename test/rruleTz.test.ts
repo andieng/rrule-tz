@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { rrulestr } from 'rrule';
+import { RRule, RRuleSet, rrulestr } from 'rrule';
 import { RRuleTZ } from '../src/rruleTz';
 import { RRuleTZError } from '../src/errors';
 
@@ -9,6 +9,36 @@ describe('RRuleTZ', () => {
       const set = rrulestr('DTSTART;TZID=Europe/Berlin:20260211T090000\nRRULE:FREQ=DAILY;COUNT=1', { forceset: true });
       const rule = RRuleTZ.init(set);
       expect(rule.firstExecutionUTC()?.toISOString()).toBe('2026-02-11T08:00:00.000Z');
+    });
+
+    it('accepts a plain RRule instance instead of a string', () => {
+      const plain = new RRule({ freq: RRule.DAILY, count: 1, dtstart: new Date('2026-02-11T09:00:00.000Z') });
+      const rule = RRuleTZ.init(plain);
+      expect(rule.firstExecutionUTC()?.toISOString()).toBe('2026-02-11T09:00:00.000Z');
+    });
+
+    it('preserves sub-second precision when constructing from an RRule/RRuleSet instead of a string', () => {
+      // The iCalendar string format has no sub-second component, so round-tripping through it (the
+      // old behavior, for every input) truncated milliseconds even when the caller already had them.
+      const dtstart = new Date('2026-02-11T09:00:00.250Z');
+
+      const fromRRule = RRuleTZ.init(new RRule({ freq: RRule.DAILY, count: 1, dtstart }));
+      expect(fromRRule.firstExecutionUTC()?.toISOString()).toBe('2026-02-11T09:00:00.250Z');
+
+      const set = new RRuleSet();
+      set.rrule(new RRule({ freq: RRule.DAILY, count: 1, dtstart }));
+      const fromRRuleSet = RRuleTZ.init(set);
+      expect(fromRRuleSet.firstExecutionUTC()?.toISOString()).toBe('2026-02-11T09:00:00.250Z');
+    });
+
+    it('does not let later mutation of a caller-supplied RRuleSet change what the instance answers', () => {
+      const set = new RRuleSet();
+      set.rrule(new RRule({ freq: RRule.DAILY, count: 1, dtstart: new Date('2026-02-11T09:00:00.000Z') }));
+      const rule = RRuleTZ.init(set);
+
+      set.rrule(new RRule({ freq: RRule.DAILY, count: 1, dtstart: new Date('2099-01-01T00:00:00.000Z') }));
+
+      expect(rule.firstExecutionUTC()?.toISOString()).toBe('2026-02-11T09:00:00.000Z');
     });
 
     it('passes rrulestr options through (unfold joins an RFC 5545 folded RRULE line)', () => {

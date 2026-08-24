@@ -19,12 +19,25 @@ export class RRuleTZ {
   private readonly _rruleSet: RRuleSet;
 
   constructor(rule: string | RRule | RRuleSet, options?: RRuleTZParseOptions) {
-    const str = typeof rule === 'string' ? rule : rule.toString();
-    try {
-      this._rruleSet = rrulestr(str, { ...options, forceset: true }) as RRuleSet;
-    } catch (cause) {
-      const reason = cause instanceof Error ? cause.message : String(cause);
-      throw new RRuleTZError(`Invalid rrule string: ${str}\nReason: ${reason}`);
+    if (typeof rule === 'string') {
+      try {
+        this._rruleSet = rrulestr(rule, { ...options, forceset: true }) as RRuleSet;
+      } catch (cause) {
+        const reason = cause instanceof Error ? cause.message : String(cause);
+        throw new RRuleTZError(`Invalid rrule string: ${rule}\nReason: ${reason}`);
+      }
+    } else if (rule instanceof RRuleSet) {
+      // .clone(), not the reference itself: the caller can still mutate their own RRuleSet
+      // (rrule() / rdate() / ... are public mutators) after handing it to us, which must not
+      // retroactively change what this instance answers.
+      this._rruleSet = rule.clone();
+    } else {
+      // Building the set directly - rather than round-tripping through toString()+rrulestr() like
+      // the string branch - avoids RFC 5545's DTSTART/RDATE/EXDATE text format, which has no
+      // sub-second component: rrule's own iteration preserves milliseconds fine (verified), so the
+      // old round-trip was truncating them for no reason.
+      this._rruleSet = new RRuleSet();
+      this._rruleSet.rrule(rule.clone());
     }
 
     // A DTSTART+RDATE-only set parses fine and answers queries, but the `rrule` getter throws, which
