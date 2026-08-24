@@ -1,9 +1,33 @@
 # rrule-tz
 
-Timezone-safe query ergonomics on top of [`rrule`](https://github.com/jkbrzt/rrule). `rrule` is a solid RFC 5545 implementation, but querying a `TZID` rule's occurrences silently depends on the host machine's own timezone rather than the rule's. `rrule-tz` wraps it to fix that specifically.
+[![npm version](https://img.shields.io/npm/v/rrule-tz.svg)](https://www.npmjs.com/package/rrule-tz)
+[![CI](https://github.com/andieng/rrule-tz/actions/workflows/ci.yml/badge.svg)](https://github.com/andieng/rrule-tz/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/rrule-tz.svg)](./LICENSE)
+
+Timezone-safe occurrence queries on top of [`rrule`](https://github.com/jkbrzt/rrule). `rrule` is a solid RFC 5545 implementation, but querying a `TZID` rule's occurrences silently depends on the **host machine's** timezone instead of the rule's own — move the same code from a laptop to a server in another zone and results change. `rrule-tz` fixes exactly that.
+
+```ts
+import { RRuleTZ } from 'rrule-tz';
+
+const rule = new RRuleTZ('DTSTART;TZID=Europe/Berlin:20260211T090000\nRRULE:FREQ=DAILY;COUNT=5');
+
+rule.firstExecutionUTC();
+//=> 2026-02-11T08:00:00.000Z   (same result everywhere, regardless of host timezone)
+```
 
 > [!NOTE]
 > This release covers **occurrence queries only** (`betweenUTC`, `allUTC`, `firstExecutionUTC`, etc.). Immutable rule editing (`excludeDate`, `moveStartAfter`, `moveUntilBefore`) and cross-timezone rule conversion (`convertToTimezone`) aren't in this release yet — see [Roadmap](#roadmap).
+
+## Contents
+
+- [Install](#install)
+- [Quick start](#quick-start)
+- [The problem this fixes](#the-problem-this-fixes)
+- [API](#api)
+- [Known limitations](#known-limitations)
+- [Building app-specific extensions](#building-app-specific-extensions)
+- [Roadmap](#roadmap)
+- [Development](#development)
 
 ## Install
 
@@ -18,7 +42,7 @@ npm install rrule-tz rrule
 ```ts
 import { RRuleTZ } from 'rrule-tz';
 
-const rule = RRuleTZ.init('DTSTART;TZID=Europe/Berlin:20260211T090000\nRRULE:FREQ=DAILY;COUNT=5');
+const rule = new RRuleTZ('DTSTART;TZID=Europe/Berlin:20260211T090000\nRRULE:FREQ=DAILY;COUNT=5');
 
 rule.firstExecutionUTC();
 //=> 2026-02-11T08:00:00.000Z
@@ -75,17 +99,32 @@ import {
 } from 'rrule-tz';
 ```
 
-### `RRuleTZ.init(rule: string | RRule | RRuleSet, options?): RRuleTZ`
+| Method                                                                                        | Returns              | What it does                                              |
+| --------------------------------------------------------------------------------------------- | -------------------- | --------------------------------------------------------- |
+| [`new RRuleTZ(rule, options?)`](#new-rruletzrule-string--rrule--rruleset-options)             | `RRuleTZ`            | Parse a rule string or object into an `RRuleTZ`.          |
+| [`.betweenUTC(startAt, endAt)`](#betweenutcstartat-date-endat-date-date)                      | `Date[]`             | Occurrences within an inclusive window.                   |
+| [`.allUTC()`](#allutc-date)                                                                   | `Date[]`             | Every occurrence (throws if the rule is unbounded).       |
+| [`.firstExecutionUTC()`](#firstexecutionutc-date--null)                                       | `Date \| null`       | The rule's first occurrence.                              |
+| [`.lastExecutionUTC()`](#lastexecutionutc-date--null)                                         | `Date \| null`       | The rule's last occurrence, or `null` if unbounded.       |
+| [`.nextOccurrence(ref, inc?)`](#nextoccurrencereferencedate-date-inc-boolean-date--undefined) | `Date \| undefined`  | The first occurrence after `ref`.                         |
+| [`.prevOccurrence(ref, inc?)`](#prevoccurrencereferencedate-date-inc-boolean-date--undefined) | `Date \| undefined`  | The last occurrence before `ref`.                         |
+| [`.hasOccurrence(date)`](#hasoccurrencedate-date-boolean)                                     | `boolean`            | Whether `date` is exactly one of the rule's occurrences.  |
+| [`.rdatesUTC()` / `.exdatesUTC()`](#rdatesutc-date--exdatesutc-date)                          | `Date[]`             | The rule's `RDATE`/`EXDATE` entries as true UTC instants. |
+| [`.occurrenceSize()`](#occurrencesize-occurrencesize)                                         | `OccurrenceSize`     | `NONE` / `ONE` / `MANY`.                                  |
+| [`.occurrencePosition(date)`](#occurrencepositiondate-date-occurrenceposition)                | `OccurrencePosition` | `FIRST` / `MIDDLE` / `LAST` for a given occurrence.       |
+| [`.toString()`](#tostring-string)                                                             | `string`             | Serializes back to the iCalendar string.                  |
+
+### `new RRuleTZ(rule: string | RRule | RRuleSet, options?)`
 
 Parses an iCalendar `RRULE`/`DTSTART` string — or takes an existing `RRule`/`RRuleSet` instance — into an `RRuleTZ`. Throws `RRuleTZError` if the string is malformed, or if the set has no `RRULE`. The optional second argument passes through `rrulestr`'s parse options (e.g. `unfold` for RFC 5545 folded lines); `forceset` is always on.
 
 ```ts
 import { RRule, datetime } from 'rrule';
 
-const rule = RRuleTZ.init('DTSTART;TZID=Europe/Berlin:20260211T090000\nRRULE:FREQ=DAILY;COUNT=5');
+const rule = new RRuleTZ('DTSTART;TZID=Europe/Berlin:20260211T090000\nRRULE:FREQ=DAILY;COUNT=5');
 
 // or from rrule objects, e.g. built from an options object:
-const sameRule = RRuleTZ.init(
+const sameRule = new RRuleTZ(
   new RRule({ freq: RRule.DAILY, count: 5, dtstart: datetime(2026, 2, 11, 9), tzid: 'Europe/Berlin' }),
 );
 ```
@@ -132,7 +171,7 @@ The rule's last occurrence, as a true UTC instant. `null` if any `RRULE` in the 
 The first occurrence after `referenceDate`, or `undefined` if there isn't one. Pass `inc: true` to let `referenceDate` itself count as a match when it is an occurrence.
 
 ```ts
-const rule = RRuleTZ.init('DTSTART:20260211T090000Z\nRRULE:FREQ=DAILY;COUNT=3');
+const rule = new RRuleTZ('DTSTART:20260211T090000Z\nRRULE:FREQ=DAILY;COUNT=3');
 const occurrence = new Date('2026-02-12T09:00:00Z');
 
 rule.nextOccurrence(occurrence);
@@ -191,7 +230,7 @@ The host machine's own IANA system timezone, resolved fresh on every call rather
 
 **The DST fold hour**, covered in the callout near the top: during a fall-back transition a local wall-clock time occurs twice, so a floating representation of it maps to two different instants with nothing to disambiguate them. No library can resolve this; avoid scheduling into the repeated hour.
 
-**Sub-second precision is dropped when constructing from a `DTSTART`/`RDATE`/`EXDATE` string.** RFC 5545's iCalendar text format has no sub-second component, so a string like `DTSTART:20260211T090000Z` never had milliseconds to lose in the first place — this is a property of the format, not this package. Constructing from an already-parsed `RRule`/`RRuleSet` instance is unaffected: `RRuleTZ.init()` uses that instance directly (`.clone()`d, so later mutating your own copy doesn't retroactively change what the instance answers) rather than round-tripping it through a string.
+**Sub-second precision is dropped when constructing from a `DTSTART`/`RDATE`/`EXDATE` string.** RFC 5545's iCalendar text format has no sub-second component, so a string like `DTSTART:20260211T090000Z` never had milliseconds to lose in the first place — this is a property of the format, not this package. Constructing from an already-parsed `RRule`/`RRuleSet` instance is unaffected: the `RRuleTZ` constructor uses that instance directly (`.clone()`d, so later mutating your own copy doesn't retroactively change what the instance answers) rather than round-tripping it through a string.
 
 **`RDATE`/`EXDATE` lines with a `TZID` different from `DTSTART`'s are silently reinterpreted using `DTSTART`'s zone.** This is an `rrule` parsing limitation, not one introduced here — the per-line `TZID` is discarded at parse time rather than used to compute the instant, so `EXDATE;TZID=America/New_York:...` on a `DTSTART;TZID=Europe/Berlin` rule excludes the wrong UTC instant with no error. Always give every `RDATE`/`EXDATE` line the same `TZID` as `DTSTART` (or none, for a UTC/floating rule).
 
@@ -214,11 +253,9 @@ class DeviceRuleHelper extends RRuleTZ {
     const utcDtstart = this.utcFromRuleFloating(dtstart!);
     // ...map BYDAY/time into the device's own format
   }
-
-  static init(str: string): DeviceRuleHelper {
-    return new DeviceRuleHelper(str);
-  }
 }
+
+const rule = new DeviceRuleHelper('DTSTART;TZID=Europe/Berlin:20260211T090000\nRRULE:FREQ=DAILY;COUNT=5');
 ```
 
 ## Roadmap

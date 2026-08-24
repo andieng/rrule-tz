@@ -214,8 +214,4 @@ export class RRuleTZ {
     if (last && occurrenceTime === last.getTime()) return OccurrencePosition.LAST;
     return OccurrencePosition.MIDDLE;
   }
-
-  static init(rule: string | RRule | RRuleSet, options?: RRuleTZParseOptions): RRuleTZ {
-    return new RRuleTZ(rule, options);
-  }
 }
