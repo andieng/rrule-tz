@@ -1,6 +1,9 @@
 # rrule-tz
 
-Timezone-safe ergonomics on top of [`rrule`](https://github.com/jkbrzt/rrule). `rrule` is a solid RFC 5545 implementation, but a few of its behaviors around `TZID` rules are easy to get wrong in production. `rrule-tz` wraps it to fix those specifically, and adds a small immutable editing API for common recurrence-rule edits.
+Timezone-safe query ergonomics on top of [`rrule`](https://github.com/jkbrzt/rrule). `rrule` is a solid RFC 5545 implementation, but querying a `TZID` rule's occurrences silently depends on the host machine's own timezone rather than the rule's. `rrule-tz` wraps it to fix that specifically.
+
+> [!NOTE]
+> This release covers **occurrence queries only** (`betweenUTC`, `allUTC`, `firstExecutionUTC`, etc.) — the surface that's been hardened against 4 rounds of adversarial review and is verified across 6 host timezones. Immutable rule editing (`excludeDate`, `moveStartAfter`, `moveUntilBefore`) and cross-timezone rule conversion (`convertToTimezone`) are still under active hardening on a separate branch and aren't in this release — see [Roadmap](#roadmap).
 
 ## Install
 
@@ -38,19 +41,16 @@ rule.firstExecutionUTC();
 
 rule.betweenUTC(new Date('2026-02-11T00:00:00Z'), new Date('2026-02-13T00:00:00Z'));
 //=> [2026-02-11T08:00:00.000Z, 2026-02-12T08:00:00.000Z]
-
-rule.excludeDate(new Date('2026-02-12T08:00:00.000Z'));
-//=> a new RRuleTZ, unchanged except for an added EXDATE on 2026-02-12
 ```
 
-All of the above is **independent of the host machine's timezone** — the same code returns the same UTC instants whether it runs on a laptop set to `Europe/Berlin` or a server set to `UTC`. Plain `rrule` does not give you that guarantee; see [problem 1](#1-rrule-rezones-all--before--after--between-to-the-host-machines-timezone) below.
+All of the above is **independent of the host machine's timezone** — the same code returns the same UTC instants whether it runs on a laptop set to `Europe/Berlin` or a server set to `UTC`. Plain `rrule` does not give you that guarantee; see [the problem this fixes](#the-problem-this-fixes) below.
 
 > [!NOTE]
 > **What this package does _not_ fix: the DST fold hour.** During a fall-back DST transition, a local wall-clock time occurs twice. In `Europe/Berlin` on 2026-10-25, clocks jump back from 03:00 CEST to 02:00 CET, so **02:00–03:00 local happens twice** — 02:30 is both `00:30Z` and `01:30Z`. Round-tripping a `Date` through a floating (timezone-mislabeled) representation during that hour is inherently ambiguous: no timezone library can losslessly resolve it, and this package doesn't pretend to. Avoid scheduling recurrence rules with `DTSTART`/occurrences that land in the repeated hour.
 
-## The problems this fixes
+## The problem this fixes
 
-### 1. rrule rezones `all()`/`before()`/`after()`/`between()` to the _host machine's_ timezone
+### rrule rezones `all()`/`before()`/`after()`/`between()` to the _host machine's_ timezone
 
 If a `RRuleSet` has a `TZID`, calling `.all()`, `.between()`, `.before()`, or `.after()` on it directly does **not** interpret your query bounds in UTC, and does **not** interpret them in the rule's own `TZID` either — it silently uses whatever IANA timezone the _host machine_ happens to be running in. Move the same code from a laptop in `Europe/Berlin` to a Lambda running in `UTC`, and query results for the exact same rule and the exact same bounds change. `.all()` is affected too whenever the rule has an `EXDATE`/`RDATE` — the bug lives in how rrule resolves those against the host's `Intl.DateTimeFormat().resolvedOptions().timeZone`, not just in bound comparison.
 
@@ -66,53 +66,15 @@ const set = rrulestr('DTSTART;TZID=Europe/Berlin:20260211T090000\nRRULE:FREQ=DAI
 set.between(new Date('2026-02-10T00:00:00Z'), new Date('2026-02-12T00:00:00Z'), true);
 ```
 
-`RRuleTZ.betweenUTC()` (and `allUTC`, `firstExecutionUTC`, `lastExecutionUTC`, `nextOccurrence`, `prevOccurrence`) take true UTC instants in, and return true UTC instants out — independent of the host machine's timezone, verified by tests that fake the system timezone across five different zones.
+`RRuleTZ.betweenUTC()` (and `allUTC`, `firstExecutionUTC`, `lastExecutionUTC`, `nextOccurrence`, `prevOccurrence`) take true UTC instants in, and return true UTC instants out — independent of the host machine's timezone, verified by tests that fake the system timezone across six different zones, including fractional offsets (+05:30, +12:45).
 
-### 2. `BYDAY`/`UNTIL` are calendar-day-relative, not real-time instants
+### No built-in IANA timezone validation
 
-Converting a rule's wall-clock time into a different timezone can push `DTSTART` onto a different calendar day — 23:00 in Berlin is already the next day in Saigon. `BYDAY` and `UNTIL` are defined relative to the _local calendar date_, so naively converting them through a UTC instant produces a rule that fires on the wrong weekdays.
+`isValidTimezone(tzid)` checks a timezone name against the runtime's ICU data via `Intl.DateTimeFormat`, so you can reject a bad `TZID` before it causes an obscure failure later.
 
-```ts
-rule.convertToTimezone('Asia/Saigon');
-// DTSTART 20260101T230000 (Mon 23:00 Berlin) -> 20260102T050000 (Tue 05:00 Saigon)
-// BYDAY=MO,WE,FR correctly becomes BYDAY=TU,TH,SA — shifted by the same day the date rolled over
-```
+### No finiteness / position introspection
 
-`convertToTimezone()` applies that shift consistently across the whole rule, not just `DTSTART`/`EXDATE`/`RDATE`:
-
-- `BYDAY` and `UNTIL` shift by the day-delta (mod-7 wraparound for weekdays).
-- `BYHOUR`/`BYMINUTE` shift by the offset delta itself (fractional-hour zones like `Asia/Kolkata` +5:30 included); `BYSECOND` passes through, since IANA offsets are whole minutes. When `BYHOUR` is present, the day-delta for the calendar fields comes from the occurrences' own midnight rollover, not `DTSTART`'s.
-- `BYMONTHDAY`/`BYYEARDAY` shift with boundary wraparound where it has one stable meaning: `1 ↔ -1` (the 1st and last day exist in every month/year).
-- `BYWEEKNO` shifts only when the weekday shift crosses the ISO Monday boundary.
-- `EXRULE` lines get the same treatment, each with its own day-carry.
-
-> [!NOTE]
-> **What "converted" means here.** `convertToTimezone()` preserves the rule's _local wall-clock structure_ — a 09:00 Berlin rule becomes a 15:00 Saigon rule. It does not pin the occurrences to fixed instants forever. When the two zones don't observe DST identically, the two rules drift apart by the offset difference:
->
-> ```ts
-> // Berlin monthly at 09:00, converted to Asia/Ho_Chi_Minh (15:00, never shifts):
-> // January - Berlin is CET (+1), the offset DTSTART was written at:
-> //   Berlin 09:00 = 08:00Z ; Saigon 15:00 = 08:00Z   -> same instant
-> // July - Berlin is CEST (+2):
-> //   Berlin 09:00 = 07:00Z ; Saigon 15:00 = 08:00Z   -> one hour apart
-> ```
->
-> This is the intended behavior for "run this schedule at the same local time over there," which is what timezone conversion of a recurrence rule normally means. Just don't rely on it to keep two rules on identical instants across a DST boundary.
-
-> [!IMPORTANT]
-> A few value/shift combinations are genuinely not expressible as a single shifted RRULE, and `convertToTimezone()` throws `RRuleTZError` for those rather than producing a silently wrong rule: `BYHOUR`/`BYMINUTE` sets that a shift splits across midnight or an hour boundary (e.g. `BYHOUR=9,23` shifted +6h — one value rolls to the next day, the other doesn't); `BYMONTHDAY` values whose shifted position depends on the month's length (e.g. `31` shifted forward, `29` shifted backward); `BYYEARDAY=365/366` and mirrors, which depend on leap years; `BYWEEKNO` without `BYDAY` (it selects all 7 days of the week, whose shifted image is not a whole ISO week) or with weekdays that cross the ISO week boundary inconsistently.
-
-### 3. No immutable editing API
-
-Editing a recurrence rule with the raw `rrule` API means hand-rolling `RRuleSet` mutation and string round-tripping every time. `RRuleTZ` exposes the common edits as pure methods that return a new instance: `excludeDate()`, `moveStartAfter()`, `moveUntilBefore()` — see [API](#api) below.
-
-### 4. No built-in IANA timezone validation
-
-`isValidTimezone(tzid)` checks a timezone name against the runtime's ICU data via `Intl.DateTimeFormat`, so you can reject a bad `TZID` before it causes an obscure failure later. `convertToTimezone()` uses this internally.
-
-### 5. No finiteness / position introspection
-
-`occurrenceSize()` tells you whether a rule produces exactly one occurrence or many. `occurrencePosition(date)` tells you whether a given occurrence is the `FIRST`, `MIDDLE`, or `LAST` in the series — both without you having to manually branch on `COUNT`/`UNTIL`.
+`occurrenceSize()` tells you whether a rule produces no occurrences, exactly one, or many. `occurrencePosition(date)` tells you whether a given occurrence is the `FIRST`, `MIDDLE`, or `LAST` in the series — both without you having to manually branch on `COUNT`/`UNTIL`.
 
 ## API
 
@@ -130,7 +92,7 @@ import {
 
 ### `RRuleTZ.init(rule: string | RRule | RRuleSet, options?): RRuleTZ`
 
-Parses an iCalendar `RRULE`/`DTSTART` string — or takes an existing `RRule`/`RRuleSet` instance — into an `RRuleTZ`. Throws `RRuleTZError` if the string is malformed. The optional second argument passes through `rrulestr`'s parse options (e.g. `unfold` for RFC 5545 folded lines); `forceset` is always on.
+Parses an iCalendar `RRULE`/`DTSTART` string — or takes an existing `RRule`/`RRuleSet` instance — into an `RRuleTZ`. Throws `RRuleTZError` if the string is malformed, or if the set has no `RRULE`. The optional second argument passes through `rrulestr`'s parse options (e.g. `unfold` for RFC 5545 folded lines); `forceset` is always on.
 
 ```ts
 import { RRule, datetime } from 'rrule';
@@ -142,6 +104,8 @@ const sameRule = RRuleTZ.init(
   new RRule({ freq: RRule.DAILY, count: 5, dtstart: datetime(2026, 2, 11, 9), tzid: 'Europe/Berlin' }),
 );
 ```
+
+A set can combine more than one `RRULE` (e.g. "every Monday" _and_ "the 1st of every month") — every method below handles that correctly via `rruleSet`'s own combined iteration; `allUTC()`/`lastExecutionUTC()` require every `RRULE` in the set to be bounded.
 
 ### `.rruleSet` / `.rrule`
 
@@ -176,7 +140,7 @@ rule.firstExecutionUTC();
 
 ### `.lastExecutionUTC(): Date | null`
 
-The rule's last occurrence, as a true UTC instant. `null` for a rule with no `COUNT`/`UNTIL` (i.e. one that recurs forever).
+The rule's last occurrence, as a true UTC instant. `null` if any `RRULE` in the set has no `COUNT`/`UNTIL` (i.e. the combined series recurs forever).
 
 ### `.nextOccurrence(referenceDate: Date, inc?: boolean): Date | undefined`
 
@@ -226,30 +190,6 @@ rule.exdatesUTC();
 
 `OccurrencePosition.FIRST`, `MIDDLE`, or `LAST` for where `date` falls in the series. Throws `RRuleTZError` if `date` isn't one of the rule's occurrences.
 
-### `.excludeDate(date: Date): RRuleTZ`
-
-Returns a new `RRuleTZ` with `date` added as an `EXDATE`. Throws if `date` isn't one of the rule's occurrences.
-
-```ts
-rule.excludeDate(new Date('2026-02-12T08:00:00.000Z'));
-```
-
-### `.moveStartAfter(date: Date): RRuleTZ`
-
-Returns a new `RRuleTZ` with `DTSTART` advanced to the occurrence after `date`, adjusting `COUNT` so the series still ends where it did. `date` must be the rule's _current first_ occurrence — this is enforced, and passing a later one throws. Use this instead of `excludeDate()` to drop the first occurrence, since there's nothing before it for an `EXDATE` to sit "between". Throws for a set with more than one `RRULE` — see [multiple RRULEs](#multiple-rrules).
-
-### `.moveUntilBefore(date: Date): RRuleTZ`
-
-Returns a new `RRuleTZ` truncated so it ends just before `date`: `UNTIL` becomes the exact instant of the occurrence preceding `date`, which keeps that one (RFC 5545 `UNTIL` is inclusive) and drops `date` itself. Throws if `date` isn't one of the rule's occurrences, or if there's no preceding occurrence to truncate to.
-
-### `.convertToTimezone(newTzid: string): RRuleTZ`
-
-Returns a new `RRuleTZ` expressing the same local schedule in `newTzid` (see the note in [problem 2](#2-bydayuntil-are-calendar-day-relative-not-real-time-instants) on what that does and doesn't guarantee across DST), shifting every calendar- and clock-relative field — `BYDAY`, `UNTIL`, `BYHOUR`, `BYMINUTE`, `BYMONTHDAY`, `BYYEARDAY`, `BYWEEKNO`, and any `EXRULE` — by the offset delta (see [problem 2](#2-bydayuntil-are-calendar-day-relative-not-real-time-instants)). Throws `RRuleTZError` if `newTzid` isn't a valid IANA timezone name, or for the few value/shift combinations RRULE syntax cannot express (see the callout above).
-
-```ts
-rule.convertToTimezone('Asia/Saigon');
-```
-
 ### `isValidTimezone(tzid: string): boolean`
 
 Whether `tzid` is a valid IANA timezone name (e.g. `"Europe/Berlin"`, not `"CET"` or `"GMT+1"`).
@@ -260,53 +200,16 @@ Low-level conversions between a true UTC instant and its "floating" wall-clock d
 
 ## Known limitations
 
-Things this package deliberately does not solve. These are inherent rather than unfinished work, and all of them fail loudly rather than silently.
-
-### The DST fold hour
-
-Covered in the callout near the top. During a fall-back transition a local wall-clock time occurs twice, so a floating representation of it maps to two different instants with nothing to disambiguate them. No library can resolve this; avoid scheduling into the repeated hour.
-
-### `BY*` values a timezone shift can't express
-
-`convertToTimezone()` throws `RRuleTZError` rather than emit a rule that is quietly wrong. There is no valid RRULE for these cases:
-
-| Case                                                                       | Why it can't be expressed                                                                                                                                                                  |
-| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `BYHOUR`/`BYMINUTE` split by the shift, e.g. `BYHOUR=9,23` +6h             | 09:00 lands the same day, 23:00 lands the next. One rule applies the same hours to every day it selects, so "15:00 today and 05:00 tomorrow" is unsayable.                                 |
-| `BYMONTHDAY` that depends on month length, e.g. `31` shifted +1            | "The day after the 31st" doesn't exist in February, and `BYMONTHDAY=1` would also fire after 30-day months — a different rule.                                                             |
-| `BYYEARDAY=365`/`366` and their negative mirrors                           | In a leap year the 365th day is 30 December, so the shifted target changes with the year.                                                                                                  |
-| `BYWEEKNO` without `BYDAY`                                                 | It selects all 7 days of the week; shifted by a day that becomes Tue–Mon, which spans two ISO weeks rather than being one.                                                                 |
-| `BYWEEKNO` whose `BYDAY` values cross the ISO week boundary inconsistently | Some weekdays would move into a different week than others, which a single `BYWEEKNO` can't represent.                                                                                     |
-| Ordinal `BYDAY`, e.g. `1SU` or `-1SU`                                      | "The day after the first Sunday" is not "the first Monday" — when the month opens on a Monday the two land weeks apart, dropping an occurrence.                                            |
-| `BYSETPOS`                                                                 | It picks by position within each period, so moving the underlying weekdays re-anchors that position: `BYDAY=MO..FR;BYSETPOS=-1` ("last weekday of the month") would become "last Tue–Sat". |
-
-Everything else shifts correctly — see [problem 2](#2-bydayuntil-are-calendar-day-relative-not-real-time-instants).
-
-### `UNTIL` is serialized rrule-style, not RFC-style
-
-For a rule with a `TZID`, RFC 5545 requires `UNTIL` to be a UTC timestamp ending in `Z`. `rrule` instead writes and reads it as local wall-clock digits with no suffix, and `rrule-tz` follows `rrule` so that values round-trip correctly through the library that actually evaluates them:
-
-```
-DTSTART;TZID=Europe/Berlin:20260211T090000
-RRULE:FREQ=DAILY;UNTIL=20260213T090000      ← local digits, no Z
-```
-
-This is self-consistent within `rrule`/`rrule-tz`. But if you hand `rule.toString()` to a _different_ iCalendar implementation — ical.js, python-dateutil, Google Calendar — it will read that `UNTIL` as UTC and end the series at an instant off by the zone's offset. Convert `UNTIL` to a real UTC timestamp before exporting to any non-`rrule` consumer.
-
-### Multiple RRULEs
-
-A set can combine more than one `RRULE` (e.g. "every Monday" _and_ "the 1st of every month"). Every query method (`betweenUTC`, `allUTC`, `hasOccurrence`, `occurrenceSize`, ...) and `excludeDate`/`convertToTimezone` handle this correctly — `allUTC()`/`lastExecutionUTC()` require every `RRULE` to be bounded, and `convertToTimezone()` shifts each `RRULE` independently (the same treatment it already gives `EXRULE`s).
-
-`moveStartAfter()` is the one exception: `DTSTART` is a single line shared by every `RRULE` in the set, so moving it moves every rule's start at once — for a `WEEKLY`/`MONTHLY`/`YEARLY` rule with no explicit `BYDAY`/`BYMONTHDAY`, that can silently change its derived calendar position too (the same hazard [problem 2](#2-bydayuntil-are-calendar-day-relative-not-real-time-instants) guards against for timezone conversion). It throws `RRuleTZError` for a multi-`RRULE` set — use `excludeDate()` on the individual occurrence instead. `EXRULE`, `EXDATE` and `RDATE` are all supported throughout.
+The DST fold hour, covered in the callout near the top: during a fall-back transition a local wall-clock time occurs twice, so a floating representation of it maps to two different instants with nothing to disambiguate them. No library can resolve this; avoid scheduling into the repeated hour.
 
 ## Building app-specific extensions
 
-This package intentionally stays generic (no app-specific business rules). If your app has its own recurrence conventions (say, normalizing a rule's `DTSTART` onto a rolling weekly window, or mapping a rule to a device's own weekday/time wire format), build that as a thin layer on top of `RRuleTZ` in your own codebase rather than re-solving the `TZID` rezoning problem.
+This package intentionally stays generic (no app-specific business rules). If your app has its own recurrence conventions (say, mapping a rule to a device's own weekday/time wire format), build that as a thin layer on top of `RRuleTZ` in your own codebase rather than re-solving the `TZID` rezoning problem.
 
 Subclassing is supported for exactly this. Beyond the public API, subclasses get:
 
 - `this.tzid` — the rule's own IANA timezone, or `null` for a floating/UTC rule.
-- `this.ruleFloatingFromUtc(instant)` (`protected`) — a true UTC instant to floating wall-clock digits in the rule's timezone, for building new `DTSTART`/`EXDATE`/`RDATE` values.
+- `this.ruleFloatingFromUtc(instant)` (`protected`) — a true UTC instant to floating wall-clock digits in the rule's timezone.
 - `this.utcFromRuleFloating(floating)` (`protected`) — the inverse.
 
 ```ts
@@ -325,14 +228,9 @@ class DeviceRuleHelper extends RRuleTZ {
 }
 ```
 
-The immutable edit methods (`excludeDate`, `moveStartAfter`, `moveUntilBefore`, `convertToTimezone`) are typed to return `this`, and construct the result with your own constructor — so a subclass survives an edit and its methods stay available:
+## Roadmap
 
-```ts
-const rule = DeviceRuleHelper.init(ruleString);
-rule.excludeDate(occurrence).toDeviceWireFormat(); // still a DeviceRuleHelper
-```
-
-If your subclass validates in its constructor, note that the validation therefore runs again on every edit result.
+Immutable rule editing (`excludeDate`, `moveStartAfter`, `moveUntilBefore`) and `convertToTimezone` (cross-timezone rule conversion, including `BYDAY`/`BYMONTHDAY`/`BYHOUR` shifting) exist on a separate branch. They're deferred from this release because, unlike the query methods above, their test coverage is entirely example-based rather than property-based over the `FREQ` × `BY*` × multi-`RRULE` combinatorial space — four rounds of review each found real defects in that area, including one round that introduced a bug while fixing another. They'll ship once that branch has systematic (generated, not hand-picked) test coverage.
 
 ## Development
 

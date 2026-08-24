@@ -1,7 +1,7 @@
 {
   "name": "rrule-tz",
   "version": "0.1.0",
-  "description": "Timezone-safe wrapper around rrule — true-UTC occurrence queries, correct BY* timezone conversion, and immutable rule edits.",
+  "description": "Timezone-safe wrapper around rrule — true-UTC occurrence queries, independent of the host machine's timezone.",
   "license": "MIT",
   "author": "Thuy Nguyen",
   "keywords": [
