@@ -21,7 +21,7 @@ describe('getUtcTimeFromLocal', () => {
 
 describe('getLocalTimeInUtc', () => {
   it('is the inverse of getUtcTimeFromLocal across a DST boundary', () => {
-    // Deliberately avoids the DST fall-back fold hour (2026-10-25 01:00-02:00 CEST/CET in
+    // Deliberately avoids the DST fall-back fold hour (2026-10-25 02:00-03:00 local in
     // Berlin), where the local wall-clock time is inherently ambiguous and round-tripping
     // through a floating representation cannot be lossless for any timezone library.
     const instants = ['2026-02-11T08:00:00.000Z', '2026-07-13T05:00:00.000Z', '2026-10-24T20:00:00.000Z'];

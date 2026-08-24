@@ -52,13 +52,34 @@ export function getLocalTimeInUtc(tzid: string, date: Date): Date {
 /**
  * Inverse of getLocalTimeInUtc: given a Date whose UTC-labeled fields are wall-clock time
  * in `tzid`, returns the true UTC instant.
+ *
+ * Solves for `t` where `t + offset(t) === date`, re-sampling the offset at each candidate instant
+ * rather than at the floating digits - near a DST transition those two land on opposite sides of
+ * the jump, so a single-pass `date - offset(date)` can be an hour out. Ambiguous during a fall-back
+ * fold, same as any floating-time round-trip; see the DST fold-hour limitation in the README.
+ *
  * @param tzid - IANA timezone name (e.g. "Europe/Berlin")
  * @param date - A Date whose UTC-labeled fields are wall-clock time in `tzid`
  * @returns The true UTC instant
  */
 export function getUtcTimeFromLocal(tzid: string, date: Date): Date {
-  return new Date(date.getTime() - offsetMs(tzid, date));
+  const target = date.getTime();
+  let instant = target - offsetMs(tzid, date);
+
+  for (let i = 0; i < 3; i++) {
+    const refined = target - offsetMs(tzid, new Date(instant));
+    if (refined === instant) break;
+    instant = refined;
+  }
+
+  return new Date(instant);
 }
 
-/** The host machine's own IANA system timezone, resolved once at import time. */
-export const MACHINE_LOCAL_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+/**
+ * The host machine's own IANA system timezone, resolved on every call. Not cached: Node re-reads
+ * `process.env.TZ`, and rrule's own rezoning always follows the live value - a cached copy would
+ * desync from it and reintroduce the host-dependence this package exists to remove.
+ */
+export function machineLocalTz(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone;
+}

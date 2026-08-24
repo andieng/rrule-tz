@@ -1,8 +1,21 @@
 {
   "name": "rrule-tz",
   "version": "0.1.0",
-  "description": "Timezone-safe ergonomics on top of rrule: fixes the host-timezone rezoning bug, calendar-day-relative BYDAY/UNTIL shifting, and adds an immutable editing API.",
+  "description": "Timezone-safe wrapper around rrule — true-UTC occurrence queries, correct BY* timezone conversion, and immutable rule edits.",
   "license": "MIT",
+  "author": "Thuy Nguyen",
+  "keywords": [
+    "rrule",
+    "recurrence",
+    "recurring-events",
+    "icalendar",
+    "rfc5545",
+    "timezone",
+    "dst",
+    "scheduling",
+    "calendar",
+    "typescript"
+  ],
   "type": "module",
   "sideEffects": false,
   "engines": {
@@ -13,9 +26,14 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     }
   },
   "files": [
@@ -29,7 +47,7 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run typecheck && npm run lint && npm run test && npm run build"
   },
   "peerDependencies": {
     "rrule": "^2.8.1"

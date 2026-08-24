@@ -60,6 +60,216 @@ describe('RRuleTZ', () => {
     });
   });
 
+  // Each case below reproduces a bug found in review; all of them passed silently before the fix.
+  describe('regressions', () => {
+    const iso = (d: Date): string => d.toISOString();
+
+    it('is unaffected by a DST transition in the HOST timezone (finding 1)', () => {
+      // 2026-03-08 is the US spring-forward. A New York host used to shift this Berlin rule by an
+      // hour; Berlin's own DST doesn't start until 2026-03-29.
+      const rule = RRuleTZ.init('DTSTART;TZID=Europe/Berlin:20260301T090000\nRRULE:FREQ=DAILY;COUNT=40');
+      const byDay = new Map(rule.allUTC().map(d => [iso(d).slice(0, 10), iso(d)]));
+      expect(byDay.get('2026-03-08')).toBe('2026-03-08T08:00:00.000Z');
+      // ...and after Berlin's own transition the offset legitimately changes.
+      expect(byDay.get('2026-04-04')).toBe('2026-04-04T07:00:00.000Z');
+    });
+
+    it('resolves EXDATE across a DST transition in the rule timezone (finding 1)', () => {
+      const rule = RRuleTZ.init(
+        'DTSTART;TZID=Australia/Sydney:20260401T003000\nRRULE:FREQ=DAILY;COUNT=10\nEXDATE;TZID=Australia/Sydney:20260405T003000',
+      );
+      expect(rule.exdatesUTC().map(iso)).toEqual(['2026-04-04T13:30:00.000Z']);
+    });
+
+    it('truncates rather than extends a sub-daily rule (finding 3)', () => {
+      const rule = RRuleTZ.init('DTSTART:20260101T000000Z\nRRULE:FREQ=HOURLY;COUNT=6');
+      const truncated = rule.moveUntilBefore(new Date('2026-01-01T03:00:00.000Z'));
+      expect(truncated.allUTC().map(iso)).toEqual([
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-01T01:00:00.000Z',
+        '2026-01-01T02:00:00.000Z',
+      ]);
+    });
+
+    it('keeps a mid-day UNTIL on the same instant when converting (finding 4)', () => {
+      const original = RRuleTZ.init(
+        'DTSTART;TZID=Europe/Berlin:20260105T090000\nRRULE:FREQ=DAILY;UNTIL=20260110T100000',
+      );
+      const converted = original.convertToTimezone('Asia/Saigon');
+      expect(converted.allUTC().map(iso)).toEqual(original.allUTC().map(iso));
+    });
+
+    it('round-trips a conversion back to the identical rule string (finding 4)', () => {
+      const start =
+        'DTSTART;TZID=Europe/Berlin:20260101T230000\nRRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;UNTIL=20260110T235900\nEXDATE;TZID=Europe/Berlin:20260105T230000';
+      expect(RRuleTZ.init(start).convertToTimezone('Asia/Saigon').convertToTimezone('Europe/Berlin').toString()).toBe(
+        start,
+      );
+    });
+
+    it('supports a set with multiple RRULEs instead of silently dropping all but the first (finding 5, later reversed)', () => {
+      // Originally fixed by rejecting multi-RRULE sets outright at construction. That closed the
+      // silent-data-loss bug but also blocked a legitimate RRuleSet capability for every method that
+      // never actually needed the ban - see the multi-RRULE describe block below for the full story.
+      const rule = RRuleTZ.init(
+        'DTSTART:20260101T090000Z\nRRULE:FREQ=DAILY;COUNT=2\nRRULE:FREQ=WEEKLY;BYDAY=SU;COUNT=2',
+      );
+      expect(rule.allUTC().map(iso)).toEqual([
+        '2026-01-01T09:00:00.000Z',
+        '2026-01-02T09:00:00.000Z',
+        '2026-01-04T09:00:00.000Z',
+        '2026-01-11T09:00:00.000Z',
+      ]);
+    });
+
+    it('keeps the series end fixed when an EXDATE sits in the gap (finding 6)', () => {
+      const rule = RRuleTZ.init('DTSTART:20260101T090000Z\nRRULE:FREQ=DAILY;COUNT=5\nEXDATE:20260102T090000Z');
+      expect(rule.allUTC().map(iso)).toEqual([
+        '2026-01-01T09:00:00.000Z',
+        '2026-01-03T09:00:00.000Z',
+        '2026-01-04T09:00:00.000Z',
+        '2026-01-05T09:00:00.000Z',
+      ]);
+      // Dropping the first occurrence must not invent a 2026-01-06 to keep COUNT at 4.
+      expect(rule.moveStartAfter(new Date('2026-01-01T09:00:00.000Z')).allUTC().map(iso)).toEqual([
+        '2026-01-03T09:00:00.000Z',
+        '2026-01-04T09:00:00.000Z',
+        '2026-01-05T09:00:00.000Z',
+      ]);
+    });
+
+    it('rejects moveStartAfter on an occurrence that is not the first (finding 6)', () => {
+      const rule = RRuleTZ.init('DTSTART:20260101T090000Z\nRRULE:FREQ=DAILY;COUNT=5');
+      expect(() => rule.moveStartAfter(new Date('2026-01-03T09:00:00.000Z'))).toThrow(RRuleTZError);
+    });
+
+    it('rejects converting an ordinal BYDAY across a day shift (finding 2)', () => {
+      const rule = RRuleTZ.init('DTSTART;TZID=Europe/Berlin:20260607T230000\nRRULE:FREQ=MONTHLY;BYDAY=1SU;COUNT=4');
+      expect(() => rule.convertToTimezone('Asia/Saigon')).toThrow(RRuleTZError);
+    });
+
+    it('rejects converting BYSETPOS across a day shift (finding 7)', () => {
+      const rule = RRuleTZ.init(
+        'DTSTART;TZID=Europe/Berlin:20260130T230000\nRRULE:FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1;COUNT=4',
+      );
+      expect(() => rule.convertToTimezone('Asia/Saigon')).toThrow(RRuleTZError);
+    });
+
+    it("applies the ordinal-BYDAY guard to the BYHOUR-derived day shift, not DTSTART's (review 2, finding 1)", () => {
+      // DTSTART 10:00 Berlin doesn't cross midnight (+6h -> 16:00), but BYHOUR=20 does (-> 02:00
+      // next day). The guard used to read DTSTART's shift, see 0, and let the rewrite through.
+      const unsafe = RRuleTZ.init(
+        'DTSTART;TZID=Europe/Berlin:20260105T100000\nRRULE:FREQ=MONTHLY;BYDAY=+1MO;BYHOUR=20;COUNT=12',
+      );
+      expect(() => unsafe.convertToTimezone('Asia/Saigon')).toThrow(RRuleTZError);
+
+      // Mirror case: DTSTART crosses midnight but BYHOUR doesn't, so nothing shifts and the same
+      // guard must NOT reject it.
+      const safe = RRuleTZ.init(
+        'DTSTART;TZID=Europe/Berlin:20260105T230000\nRRULE:FREQ=MONTHLY;BYDAY=+1MO;BYHOUR=9;COUNT=3',
+      );
+      expect(safe.convertToTimezone('Asia/Saigon').toString()).toContain('BYDAY=+1MO');
+    });
+
+    it('drops an RDATE that moveUntilBefore truncates past (review 2, finding 2)', () => {
+      // UNTIL does not bound RDATEs, so truncating onto one used to be a silent no-op.
+      const rule = RRuleTZ.init('DTSTART:20260105T100000Z\nRRULE:FREQ=WEEKLY;COUNT=3\nRDATE:20260120T100000Z');
+      expect(rule.allUTC()).toHaveLength(4);
+      expect(rule.moveUntilBefore(new Date('2026-01-20T10:00:00.000Z')).allUTC().map(iso)).toEqual([
+        '2026-01-05T10:00:00.000Z',
+        '2026-01-12T10:00:00.000Z',
+        '2026-01-19T10:00:00.000Z',
+      ]);
+    });
+
+    it('re-anchors moveStartAfter on the next RRULE instance, not an RDATE (review 2, finding 3)', () => {
+      // The RDATE on Jan 6 is not on the weekly cadence; using it as the new DTSTART re-phased the
+      // whole series onto Tuesdays and lost Jan 12 and Jan 19.
+      const rule = RRuleTZ.init('DTSTART:20260105T100000Z\nRRULE:FREQ=WEEKLY;COUNT=3\nRDATE:20260106T100000Z');
+      expect(rule.allUTC().map(iso)).toEqual([
+        '2026-01-05T10:00:00.000Z',
+        '2026-01-06T10:00:00.000Z',
+        '2026-01-12T10:00:00.000Z',
+        '2026-01-19T10:00:00.000Z',
+      ]);
+      expect(rule.moveStartAfter(new Date('2026-01-05T10:00:00.000Z')).allUTC().map(iso)).toEqual([
+        '2026-01-06T10:00:00.000Z',
+        '2026-01-12T10:00:00.000Z',
+        '2026-01-19T10:00:00.000Z',
+      ]);
+    });
+
+    it('follows the host zone when TZ changes after import (review 3, finding 1)', () => {
+      // The host zone used to be cached at module load, while rrule's own rezoning reads it live -
+      // so setting TZ after import (a routine test-setup pattern) desynced the two.
+      const realTz = process.env.TZ;
+      try {
+        process.env.TZ = 'Pacific/Chatham'; // +12:45, deliberately not a whole-hour offset
+        const rule = RRuleTZ.init('DTSTART;TZID=Europe/Berlin:20240101T230000\nRRULE:FREQ=DAILY;COUNT=3');
+        expect(rule.allUTC().map(iso)).toEqual([
+          '2024-01-01T22:00:00.000Z',
+          '2024-01-02T22:00:00.000Z',
+          '2024-01-03T22:00:00.000Z',
+        ]);
+      } finally {
+        if (realTz === undefined) delete process.env.TZ;
+        else process.env.TZ = realTz;
+      }
+    });
+
+    it.each([
+      ['MONTHLY', 'DTSTART;TZID=Europe/Berlin:20260115T090000\nRRULE:FREQ=MONTHLY;BYHOUR=23;COUNT=3'],
+      ['WEEKLY', 'DTSTART;TZID=Europe/Berlin:20260115T090000\nRRULE:FREQ=WEEKLY;BYHOUR=23;COUNT=3'],
+      ['YEARLY', 'DTSTART;TZID=Europe/Berlin:20260115T090000\nRRULE:FREQ=YEARLY;BYHOUR=23;COUNT=3'],
+    ])(
+      'rejects a %s rule whose calendar position is derived from DTSTART when BYHOUR carries differently (review 4, finding 1)',
+      (_freq, rruleString) => {
+        // No BYDAY/BYMONTHDAY to reject, so rrule derives them from DTSTART - which moves by
+        // DTSTART's own day shift while the occurrences move by BYHOUR's. Measured before the fix:
+        // the MONTHLY case moved every occurrence a month late and dropped the first.
+        expect(() => RRuleTZ.init(rruleString).convertToTimezone('Asia/Ho_Chi_Minh')).toThrow(RRuleTZError);
+      },
+    );
+
+    it('still converts a derived-position rule when both shifts agree (review 4, finding 1)', () => {
+      const rule = RRuleTZ.init('DTSTART;TZID=Europe/Berlin:20260115T090000\nRRULE:FREQ=MONTHLY;COUNT=3');
+      const converted = rule.convertToTimezone('Asia/Ho_Chi_Minh');
+      expect(converted.allUTC().map(iso)).toEqual(rule.allUTC().map(iso));
+    });
+
+    it('reports NONE for a rule with no occurrences (review 4, finding 5)', () => {
+      // UNTIL precedes DTSTART. This used to report MANY - the opposite of the truth.
+      const empty = RRuleTZ.init('DTSTART:20260211T090000Z\nRRULE:FREQ=DAILY;UNTIL=20260210T000000Z');
+      expect(empty.allUTC()).toHaveLength(0);
+      expect(empty.occurrenceSize()).toBe('NONE');
+    });
+
+    it('rejects converting a BYMONTH rule across a day shift (review 3, finding 2)', () => {
+      // Berlin 23:00 -> Saigon next day. BYMONTH is a filter, not a shiftable field: BYMONTHDAY=-1
+      // wrapped to 1 while BYMONTH stayed 1, moving Jan 31 to Dec 31 - an 11-month error, no throw.
+      const rule = RRuleTZ.init(
+        'DTSTART;TZID=Europe/Berlin:20240131T230000\nRRULE:FREQ=YEARLY;BYMONTH=1;BYMONTHDAY=-1;COUNT=3',
+      );
+      expect(() => rule.convertToTimezone('Asia/Saigon')).toThrow(RRuleTZError);
+
+      // A conversion with no day shift leaves BYMONTH meaningful and must still work.
+      const sameDay = RRuleTZ.init('DTSTART;TZID=Europe/Berlin:20240115T090000\nRRULE:FREQ=YEARLY;BYMONTH=1;COUNT=2');
+      expect(() => sameDay.convertToTimezone('Asia/Saigon')).not.toThrow();
+    });
+
+    it('rejects a set with no RRULE rather than half-working (review 2, finding 4)', () => {
+      // Used to construct fine, answer betweenUTC, then throw from the `rrule` getter on
+      // occurrenceSize/lastExecutionUTC/every edit method.
+      expect(() => RRuleTZ.init('DTSTART:20260105T100000Z\nRDATE:20260106T100000Z')).toThrow(RRuleTZError);
+    });
+
+    it('reports the true first occurrence for a pre-1970 rule (finding 9)', () => {
+      const rule = RRuleTZ.init('DTSTART:19600101T090000Z\nRRULE:FREQ=YEARLY;COUNT=20');
+      expect(rule.firstExecutionUTC()?.toISOString()).toBe('1960-01-01T09:00:00.000Z');
+      expect(rule.occurrencePosition(new Date('1960-01-01T09:00:00.000Z'))).toBe('FIRST');
+    });
+  });
+
   describe('betweenUTC', () => {
     const iso = (rrule: string, startAt: string, endAt: string): string[] =>
       RRuleTZ.init(rrule)
@@ -107,6 +317,14 @@ describe('RRuleTZ', () => {
       const rule = RRuleTZ.init('DTSTART:20260211T090000Z\nRRULE:FREQ=DAILY');
       expect(() => rule.allUTC()).toThrow(RRuleTZError);
     });
+
+    it('allows an unbounded EXRULE, since only an RRULE can make enumeration run away (finding 8)', () => {
+      // allUTC() checks every RRULE in the set for boundedness (see the multi-RRULE describe block
+      // below), but never EXRULEs - they only ever subtract from what the bounded RRULE(s) already
+      // generated, so an unbounded one terminates fine.
+      const rule = RRuleTZ.init('DTSTART:20260101T090000Z\nRRULE:FREQ=DAILY;COUNT=2\nEXRULE:FREQ=DAILY');
+      expect(() => rule.allUTC()).not.toThrow();
+    });
   });
 
   describe('firstExecutionUTC', () => {
@@ -126,7 +344,7 @@ describe('RRuleTZ', () => {
       const RealDateTimeFormat = Intl.DateTimeFormat;
 
       /**
-       * Only intercepts the no-arg "what's my system tz" call (used by MACHINE_LOCAL_TZ and
+       * Only intercepts the no-arg "what is my system tz" call (used by machineLocalTz() and
        * rrule's own host-tz lookup) - any explicit-zone call (e.g. dayjs's tz plugin resolving
        * 'Europe/Berlin') falls through to the real constructor untouched.
        */
@@ -149,7 +367,7 @@ describe('RRuleTZ', () => {
         async fakeTz => {
           expect.assertions(1);
           mockSystemTimeZone(fakeTz);
-          vi.resetModules(); // MACHINE_LOCAL_TZ is a module-level const, must re-evaluate
+          vi.resetModules();
 
           const { RRuleTZ: FreshRRuleTZ } = await import('../src/rruleTz');
           const rule = FreshRRuleTZ.init('DTSTART;TZID=Europe/Berlin:20260211T090000\nRRULE:FREQ=DAILY;COUNT=1');
@@ -203,14 +421,16 @@ describe('RRuleTZ', () => {
     it('sets UNTIL to just before the given occurrence, preserving other rule properties', () => {
       const rule = RRuleTZ.init('DTSTART:20260101T020000Z\nRRULE:FREQ=DAILY;COUNT=10');
       const truncated = rule.moveUntilBefore(new Date('2026-01-05T02:00:00.000Z'));
-      expect(truncated.rruleSet.toString()).toBe('DTSTART:20260101T020000Z\nRRULE:FREQ=DAILY;UNTIL=20260104T235900Z');
+      // UNTIL is the previous occurrence's own instant (UNTIL is inclusive in RFC 5545), not 23:59
+      // of its calendar day - rounding up to end-of-day re-admits later same-day occurrences.
+      expect(truncated.rruleSet.toString()).toBe('DTSTART:20260101T020000Z\nRRULE:FREQ=DAILY;UNTIL=20260104T020000Z');
     });
 
     it('sets UNTIL to just before the given occurrence, preserving other rule properties - rrule has tzid', () => {
       const rule = RRuleTZ.init('DTSTART;TZID=Asia/Ho_Chi_Minh:20270101T090000\nRRULE:FREQ=DAILY;COUNT=10');
       const truncated = rule.moveUntilBefore(new Date('2027-01-05T02:00:00.000Z'));
       expect(truncated.rruleSet.toString()).toBe(
-        'DTSTART;TZID=Asia/Ho_Chi_Minh:20270101T090000\nRRULE:FREQ=DAILY;UNTIL=20270104T235900',
+        'DTSTART;TZID=Asia/Ho_Chi_Minh:20270101T090000\nRRULE:FREQ=DAILY;UNTIL=20270104T090000',
       );
     });
 
@@ -218,7 +438,7 @@ describe('RRuleTZ', () => {
       const rule = RRuleTZ.init('DTSTART:20260101T090000Z\nRRULE:FREQ=DAILY;COUNT=10\nEXDATE:20260103T090000Z');
       const truncated = rule.moveUntilBefore(new Date('2026-01-05T09:00:00.000Z'));
       expect(truncated.rruleSet.toString()).toBe(
-        'DTSTART:20260101T090000Z\nRRULE:FREQ=DAILY;UNTIL=20260104T235900Z\nEXDATE:20260103T090000Z',
+        'DTSTART:20260101T090000Z\nRRULE:FREQ=DAILY;UNTIL=20260104T090000Z\nEXDATE:20260103T090000Z',
       );
     });
 
@@ -417,13 +637,13 @@ describe('RRuleTZ', () => {
       );
       const newRule = rule.convertToTimezone('Asia/Saigon');
       expect(newRule.rruleSet.toString()).toBe(
-        'DTSTART;TZID=Asia/Saigon:20260102T050000\nRRULE:FREQ=WEEKLY;BYDAY=TU,TH,SA;UNTIL=20260111T235900\nEXDATE;TZID=Asia/Saigon:20260106T050000',
+        'DTSTART;TZID=Asia/Saigon:20260102T050000\nRRULE:FREQ=WEEKLY;BYDAY=TU,TH,SA;UNTIL=20260111T055900\nEXDATE;TZID=Asia/Saigon:20260106T050000',
       );
     });
 
     it('shifts DTSTART, BYDAY, UNTIL and EXDATE back a calendar day when converting Asia/Saigon to Europe/Berlin (inverse of the previous case)', () => {
       const rule = RRuleTZ.init(
-        'DTSTART;TZID=Asia/Saigon:20260102T050000\nRRULE:FREQ=WEEKLY;BYDAY=TU,TH,SA;UNTIL=20260111T235900\nEXDATE;TZID=Asia/Saigon:20260106T050000',
+        'DTSTART;TZID=Asia/Saigon:20260102T050000\nRRULE:FREQ=WEEKLY;BYDAY=TU,TH,SA;UNTIL=20260111T055900\nEXDATE;TZID=Asia/Saigon:20260106T050000',
       );
       const newRule = rule.convertToTimezone('Europe/Berlin');
       expect(newRule.rruleSet.toString()).toBe(
@@ -437,7 +657,7 @@ describe('RRuleTZ', () => {
       );
       const newRule = rule.convertToTimezone('Asia/Saigon');
       expect(newRule.rruleSet.toString()).toBe(
-        'DTSTART;TZID=Asia/Saigon:20260102T060000\nRRULE:FREQ=WEEKLY;BYDAY=TU,TH,SA;UNTIL=20260111T235900\nEXDATE;TZID=Asia/Saigon:20260106T060000',
+        'DTSTART;TZID=Asia/Saigon:20260102T060000\nRRULE:FREQ=WEEKLY;BYDAY=TU,TH,SA;UNTIL=20260111T065900\nEXDATE;TZID=Asia/Saigon:20260106T060000',
       );
     });
 
@@ -647,6 +867,85 @@ describe('RRuleTZ', () => {
       );
       const newRule = rule.convertToTimezone('Europe/Berlin');
       expect(newRule).toBe(rule);
+    });
+  });
+
+  // A set can legitimately have more than one RRULE (e.g. "every Monday" + "the 1st of every
+  // month"). Every query method already handles this correctly via rruleSet's own combined
+  // iteration; only moveStartAfter is unsupported, since DTSTART is one line shared by every RRULE.
+  describe('multi-RRULE sets', () => {
+    const iso = (d: Date): string => d.toISOString();
+    const twoRules = 'DTSTART:20260101T090000Z\nRRULE:FREQ=DAILY;COUNT=2\nRRULE:FREQ=WEEKLY;BYDAY=SU;COUNT=2';
+
+    it('combines occurrences from every RRULE via betweenUTC/allUTC/hasOccurrence', () => {
+      const rule = RRuleTZ.init(twoRules);
+      const expected = [
+        '2026-01-01T09:00:00.000Z',
+        '2026-01-02T09:00:00.000Z',
+        '2026-01-04T09:00:00.000Z',
+        '2026-01-11T09:00:00.000Z',
+      ];
+      expect(rule.allUTC().map(iso)).toEqual(expected);
+      expect(rule.betweenUTC(new Date('2026-01-01T00:00:00Z'), new Date('2026-01-31T00:00:00Z')).map(iso)).toEqual(
+        expected,
+      );
+      expect(rule.hasOccurrence(new Date('2026-01-04T09:00:00.000Z'))).toBe(true);
+      expect(rule.occurrenceSize()).toBe('MANY');
+      expect(rule.occurrencePosition(new Date('2026-01-01T09:00:00.000Z'))).toBe('FIRST');
+      expect(rule.occurrencePosition(new Date('2026-01-11T09:00:00.000Z'))).toBe('LAST');
+    });
+
+    it('throws from allUTC when any single RRULE is unbounded, even if another is finite', () => {
+      const rule = RRuleTZ.init('DTSTART:20260101T090000Z\nRRULE:FREQ=DAILY;COUNT=2\nRRULE:FREQ=WEEKLY;BYDAY=SU');
+      expect(() => rule.allUTC()).toThrow(RRuleTZError);
+    });
+
+    it('returns null from lastExecutionUTC when any single RRULE is unbounded', () => {
+      const rule = RRuleTZ.init('DTSTART:20260101T090000Z\nRRULE:FREQ=DAILY;COUNT=2\nRRULE:FREQ=WEEKLY;BYDAY=SU');
+      expect(rule.lastExecutionUTC()).toBeNull();
+      // firstExecutionUTC is unaffected - it only needs a lower bound, not a finite series.
+      expect(rule.firstExecutionUTC()?.toISOString()).toBe('2026-01-01T09:00:00.000Z');
+    });
+
+    it('excludeDate removes one occurrence and keeps every RRULE (finding 5)', () => {
+      const rule = RRuleTZ.init(twoRules);
+      const excluded = rule.excludeDate(new Date('2026-01-02T09:00:00.000Z'));
+      expect(excluded.allUTC().map(iso)).toEqual([
+        '2026-01-01T09:00:00.000Z',
+        '2026-01-04T09:00:00.000Z',
+        '2026-01-11T09:00:00.000Z',
+      ]);
+    });
+
+    it('convertToTimezone shifts every RRULE, preserving the combined occurrences', () => {
+      const rule = RRuleTZ.init(
+        'DTSTART;TZID=Europe/Berlin:20260105T090000\nRRULE:FREQ=DAILY;COUNT=2\nRRULE:FREQ=WEEKLY;BYDAY=SU;COUNT=2',
+      );
+      const converted = rule.convertToTimezone('Asia/Saigon');
+      expect(converted.allUTC().map(iso)).toEqual(rule.allUTC().map(iso));
+      expect(converted.rruleSet.rrules()).toHaveLength(2);
+    });
+
+    it('moveUntilBefore truncates only the RRULE(s) that need it, leaving an already-earlier-ending one untouched', () => {
+      // Rule A (daily) needs cutting; rule B (weekly, COUNT=1) already ends at Jan 4, before the
+      // cutoff, and must survive with its original COUNT rather than being extended by a shared UNTIL.
+      const rule = RRuleTZ.init(
+        'DTSTART:20260101T090000Z\nRRULE:FREQ=DAILY;COUNT=10\nRRULE:FREQ=WEEKLY;BYDAY=SU;COUNT=1',
+      );
+      const truncated = rule.moveUntilBefore(new Date('2026-01-06T09:00:00.000Z'));
+      expect(truncated.allUTC().map(iso)).toEqual([
+        '2026-01-01T09:00:00.000Z',
+        '2026-01-02T09:00:00.000Z',
+        '2026-01-03T09:00:00.000Z',
+        '2026-01-04T09:00:00.000Z',
+        '2026-01-05T09:00:00.000Z',
+      ]);
+      expect(truncated.toString()).toContain('RRULE:FREQ=WEEKLY;BYDAY=SU;COUNT=1');
+    });
+
+    it('moveStartAfter rejects a multi-RRULE set instead of silently mis-shifting the other rule', () => {
+      const rule = RRuleTZ.init(twoRules);
+      expect(() => rule.moveStartAfter(new Date('2026-01-01T09:00:00.000Z'))).toThrow(RRuleTZError);
     });
   });
 });

@@ -158,7 +158,7 @@ rule.betweenUTC(new Date('2026-02-11T00:00:00Z'), new Date('2026-02-13T00:00:00Z
 
 ### `.allUTC(): Date[]`
 
-Every occurrence of the rule, as true UTC instants. Throws `RRuleTZError` for an infinite rule (no `COUNT`/`UNTIL`) instead of iterating forever — use `betweenUTC()` for those.
+Every occurrence of the rule, as true UTC instants. Throws `RRuleTZError` for an infinite rule — any `RRULE` in the set with no `COUNT`/`UNTIL` — instead of iterating forever; use `betweenUTC()` for those.
 
 ```ts
 rule.allUTC();
@@ -220,7 +220,7 @@ rule.exdatesUTC();
 
 ### `.occurrenceSize(): OccurrenceSize`
 
-`OccurrenceSize.ONE` if the rule's first and last occurrence are the same instant, `OccurrenceSize.MANY` otherwise (including infinite rules).
+`OccurrenceSize.NONE` if the rule yields no occurrences at all (e.g. `UNTIL` precedes `DTSTART`), `OccurrenceSize.ONE` if its first and last occurrence are the same instant, `OccurrenceSize.MANY` otherwise (including infinite rules).
 
 ### `.occurrencePosition(date: Date): OccurrencePosition`
 
@@ -236,11 +236,11 @@ rule.excludeDate(new Date('2026-02-12T08:00:00.000Z'));
 
 ### `.moveStartAfter(date: Date): RRuleTZ`
 
-Returns a new `RRuleTZ` with `DTSTART` advanced to the occurrence after `date` (decrementing `COUNT` by one if the rule is count-based). `date` must be the rule's _current first_ occurrence — use this instead of `excludeDate()` to drop the first occurrence, since there's nothing before it for an `EXDATE` to sit "between".
+Returns a new `RRuleTZ` with `DTSTART` advanced to the occurrence after `date`, adjusting `COUNT` so the series still ends where it did. `date` must be the rule's _current first_ occurrence — this is enforced, and passing a later one throws. Use this instead of `excludeDate()` to drop the first occurrence, since there's nothing before it for an `EXDATE` to sit "between". Throws for a set with more than one `RRULE` — see [multiple RRULEs](#multiple-rrules).
 
 ### `.moveUntilBefore(date: Date): RRuleTZ`
 
-Returns a new `RRuleTZ` truncated so it ends just before `date` (its new `UNTIL` is set to the occurrence immediately preceding `date`). Throws if `date` isn't one of the rule's occurrences, or if there's no preceding occurrence to truncate to.
+Returns a new `RRuleTZ` truncated so it ends just before `date`: `UNTIL` becomes the exact instant of the occurrence preceding `date`, which keeps that one (RFC 5545 `UNTIL` is inclusive) and drops `date` itself. Throws if `date` isn't one of the rule's occurrences, or if there's no preceding occurrence to truncate to.
 
 ### `.convertToTimezone(newTzid: string): RRuleTZ`
 
@@ -260,7 +260,7 @@ Low-level conversions between a true UTC instant and its "floating" wall-clock d
 
 ## Known limitations
 
-Two things this package deliberately does not solve. Both are inherent rather than unfinished work, and both fail loudly rather than silently.
+Things this package deliberately does not solve. These are inherent rather than unfinished work, and all of them fail loudly rather than silently.
 
 ### The DST fold hour
 
@@ -270,15 +270,34 @@ Covered in the callout near the top. During a fall-back transition a local wall-
 
 `convertToTimezone()` throws `RRuleTZError` rather than emit a rule that is quietly wrong. There is no valid RRULE for these cases:
 
-| Case                                                                       | Why it can't be expressed                                                                                                                                  |
-| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `BYHOUR`/`BYMINUTE` split by the shift, e.g. `BYHOUR=9,23` +6h             | 09:00 lands the same day, 23:00 lands the next. One rule applies the same hours to every day it selects, so "15:00 today and 05:00 tomorrow" is unsayable. |
-| `BYMONTHDAY` that depends on month length, e.g. `31` shifted +1            | "The day after the 31st" doesn't exist in February, and `BYMONTHDAY=1` would also fire after 30-day months — a different rule.                             |
-| `BYYEARDAY=365`/`366` and their negative mirrors                           | In a leap year the 365th day is 30 December, so the shifted target changes with the year.                                                                  |
-| `BYWEEKNO` without `BYDAY`                                                 | It selects all 7 days of the week; shifted by a day that becomes Tue–Mon, which spans two ISO weeks rather than being one.                                 |
-| `BYWEEKNO` whose `BYDAY` values cross the ISO week boundary inconsistently | Some weekdays would move into a different week than others, which a single `BYWEEKNO` can't represent.                                                     |
+| Case                                                                       | Why it can't be expressed                                                                                                                                                                  |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `BYHOUR`/`BYMINUTE` split by the shift, e.g. `BYHOUR=9,23` +6h             | 09:00 lands the same day, 23:00 lands the next. One rule applies the same hours to every day it selects, so "15:00 today and 05:00 tomorrow" is unsayable.                                 |
+| `BYMONTHDAY` that depends on month length, e.g. `31` shifted +1            | "The day after the 31st" doesn't exist in February, and `BYMONTHDAY=1` would also fire after 30-day months — a different rule.                                                             |
+| `BYYEARDAY=365`/`366` and their negative mirrors                           | In a leap year the 365th day is 30 December, so the shifted target changes with the year.                                                                                                  |
+| `BYWEEKNO` without `BYDAY`                                                 | It selects all 7 days of the week; shifted by a day that becomes Tue–Mon, which spans two ISO weeks rather than being one.                                                                 |
+| `BYWEEKNO` whose `BYDAY` values cross the ISO week boundary inconsistently | Some weekdays would move into a different week than others, which a single `BYWEEKNO` can't represent.                                                                                     |
+| Ordinal `BYDAY`, e.g. `1SU` or `-1SU`                                      | "The day after the first Sunday" is not "the first Monday" — when the month opens on a Monday the two land weeks apart, dropping an occurrence.                                            |
+| `BYSETPOS`                                                                 | It picks by position within each period, so moving the underlying weekdays re-anchors that position: `BYDAY=MO..FR;BYSETPOS=-1` ("last weekday of the month") would become "last Tue–Sat". |
 
 Everything else shifts correctly — see [problem 2](#2-bydayuntil-are-calendar-day-relative-not-real-time-instants).
+
+### `UNTIL` is serialized rrule-style, not RFC-style
+
+For a rule with a `TZID`, RFC 5545 requires `UNTIL` to be a UTC timestamp ending in `Z`. `rrule` instead writes and reads it as local wall-clock digits with no suffix, and `rrule-tz` follows `rrule` so that values round-trip correctly through the library that actually evaluates them:
+
+```
+DTSTART;TZID=Europe/Berlin:20260211T090000
+RRULE:FREQ=DAILY;UNTIL=20260213T090000      ← local digits, no Z
+```
+
+This is self-consistent within `rrule`/`rrule-tz`. But if you hand `rule.toString()` to a _different_ iCalendar implementation — ical.js, python-dateutil, Google Calendar — it will read that `UNTIL` as UTC and end the series at an instant off by the zone's offset. Convert `UNTIL` to a real UTC timestamp before exporting to any non-`rrule` consumer.
+
+### Multiple RRULEs
+
+A set can combine more than one `RRULE` (e.g. "every Monday" _and_ "the 1st of every month"). Every query method (`betweenUTC`, `allUTC`, `hasOccurrence`, `occurrenceSize`, ...) and `excludeDate`/`convertToTimezone` handle this correctly — `allUTC()`/`lastExecutionUTC()` require every `RRULE` to be bounded, and `convertToTimezone()` shifts each `RRULE` independently (the same treatment it already gives `EXRULE`s).
+
+`moveStartAfter()` is the one exception: `DTSTART` is a single line shared by every `RRULE` in the set, so moving it moves every rule's start at once — for a `WEEKLY`/`MONTHLY`/`YEARLY` rule with no explicit `BYDAY`/`BYMONTHDAY`, that can silently change its derived calendar position too (the same hazard [problem 2](#2-bydayuntil-are-calendar-day-relative-not-real-time-instants) guards against for timezone conversion). It throws `RRuleTZError` for a multi-`RRULE` set — use `excludeDate()` on the individual occurrence instead. `EXRULE`, `EXDATE` and `RDATE` are all supported throughout.
 
 ## Building app-specific extensions
 

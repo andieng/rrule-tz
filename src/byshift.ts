@@ -1,6 +1,83 @@
-import { ByWeekday } from 'rrule';
+import { ByWeekday, Options, RRule } from './rruleInterop';
 import { RRuleTZError } from './errors';
-import { weekdayNum } from './weekday';
+import { weekdayNum, weekdayOrdinal } from './weekday';
+
+/**
+ * Rejects conversions where the rule's calendar position is *derived from DTSTART* but DTSTART and
+ * the occurrences move by a different number of days.
+ *
+ * When BYDAY/BYMONTHDAY/BYYEARDAY are absent, rrule derives them from DTSTART (WEEKLY: its weekday;
+ * MONTHLY/YEARLY: its day), so they follow DTSTART's own day shift - but the occurrences follow the
+ * BYHOUR-derived carry, which can differ. Nothing explicit exists for assertShiftableAcrossDays to
+ * reject, so this checks it separately.
+ */
+export function assertDerivedCalendarFieldsSafe(
+  opts: Partial<Options>,
+  dtstartDayShift: number,
+  occurrenceDayShift: number,
+): void {
+  if (dtstartDayShift === occurrenceDayShift) return;
+
+  const isSet = (value: unknown): boolean => value != null && !(Array.isArray(value) && value.length === 0);
+
+  // Any of these anchors the rule explicitly, so nothing is derived from DTSTART.
+  const anchored =
+    isSet(opts.byweekday) ||
+    isSet(opts.bymonthday) ||
+    isSet(opts.byyearday) ||
+    isSet(opts.byweekno) ||
+    isSet(opts.byeaster);
+  if (anchored) return;
+
+  // DAILY and finer repeat every period regardless of calendar position - nothing is derived.
+  const derivesFromDtstart = opts.freq === RRule.YEARLY || opts.freq === RRule.MONTHLY || opts.freq === RRule.WEEKLY;
+  if (!derivesFromDtstart) return;
+
+  throw new RRuleTZError(
+    'Cannot convert timezone: this rule takes its calendar position from DTSTART, but the timezone shift moves DTSTART and the occurrences onto different days. Set BYDAY/BYMONTHDAY explicitly to convert it.',
+  );
+}
+
+/**
+ * Rejects rule options whose meaning a whole-day shift changes in a way no single RRULE can
+ * express. Both select a day *by position within a computed set*, so shifting the underlying
+ * weekdays re-anchors that position instead of translating it:
+ * - Ordinal BYDAY ("1SU"): "the first Monday" isn't "the day after the first Sunday" - they can
+ *   land weeks apart.
+ * - BYSETPOS: "last weekday of the month" shifted becomes "last Tue-Sat", a different day near
+ *   month boundaries.
+ */
+export function assertShiftableAcrossDays(opts: Partial<Options>, dayShift: number): void {
+  if (dayShift === 0) return;
+
+  const weekdays = opts.byweekday == null ? [] : Array.isArray(opts.byweekday) ? opts.byweekday : [opts.byweekday];
+  const ordinal = weekdays.find(wd => weekdayOrdinal(wd) != null);
+  if (ordinal != null) {
+    throw new RRuleTZError(
+      `Cannot convert timezone: BYDAY=${String(ordinal)} is position-based, and shifting it by ${dayShift} day(s) would select different dates rather than the same occurrences.`,
+    );
+  }
+
+  const bysetpos = opts.bysetpos;
+  const hasSetpos = Array.isArray(bysetpos) ? bysetpos.length > 0 : bysetpos != null;
+  if (hasSetpos) {
+    throw new RRuleTZError(
+      `Cannot convert timezone: BYSETPOS selects by position within each period, so a ${dayShift}-day shift changes which occurrence it picks.`,
+    );
+  }
+
+  // BYMONTH is a hard filter on the occurrence's own month, and unlike BYMONTHDAY/BYDAY it isn't
+  // shifted here - there is no correct whole-month shift for a one-day move. Any occurrence sitting
+  // on a month edge crosses out of the allowed month and is either dropped or, combined with a
+  // wrapped BYMONTHDAY, re-selected in a completely different month (Jan 31 -> Dec 31 was measured).
+  const bymonth = opts.bymonth;
+  const hasMonth = Array.isArray(bymonth) ? bymonth.length > 0 : bymonth != null;
+  if (hasMonth) {
+    throw new RRuleTZError(
+      `Cannot convert timezone: BYMONTH filters on the occurrence's month, so a ${dayShift}-day shift can move occurrences out of the selected month entirely.`,
+    );
+  }
+}
 
 type NumberSet = number | number[] | null | undefined;
 
@@ -13,18 +90,15 @@ function toArray(value: NumberSet): number[] | null {
 
 /**
  * Shifts BYHOUR/BYMINUTE by the timezone-offset delta, carrying minute overflow into hours and
- * hour overflow into a whole-day shift. A carry is only representable when it is the same for
- * every value in a set - e.g. BYHOUR=9,23 shifted +6h puts 23:00 on the next calendar day but
- * 09:00 on the same one, and no single RRULE can say "these hours, but on different days" - so a
- * split carry throws. BYSECOND never shifts (IANA offsets are whole minutes).
- *
- * When a component is absent, rrule derives it from DTSTART, which converts exactly - but a
- * present BYMINUTE must then carry the same way as DTSTART's own minutes, or the derived hour
- * would disagree with the shifted minutes.
+ * hour overflow into a whole-day shift. A carry must be the same for every value in the set - e.g.
+ * BYHOUR=9,23 shifted +6h puts 23:00 on the next day but 09:00 on the same one, which no single
+ * RRULE can express - so a split carry throws. BYSECOND never shifts (offsets are whole minutes).
+ * A present BYMINUTE must carry the same way as DTSTART's own minutes, or the hour rrule derives
+ * from DTSTART would disagree with the shifted minutes.
  *
  * @returns The shifted sets (undefined = stays derived from DTSTART) and `dayShift`: the whole-day
- * shift the rule's occurrences experience, which the calendar-relative fields (BYDAY, UNTIL,
- * BYMONTHDAY, ...) must follow. Falls back to `dtstartDayShift` when BYHOUR is absent.
+ * shift the calendar-relative fields (BYDAY, UNTIL, BYMONTHDAY, ...) must follow. Falls back to
+ * `dtstartDayShift` when BYHOUR is absent.
  */
 export function shiftTimeOfDay(
   byhour: NumberSet,
@@ -137,6 +211,7 @@ export function shiftByWeekno(
   byweekno: NumberSet,
   byweekday: ByWeekday | ByWeekday[] | null | undefined,
   dayShift: number,
+  wkst?: Options['wkst'],
 ): NumberSet {
   const weeks = toArray(byweekno);
   if (!weeks || dayShift === 0) return byweekno;
@@ -148,11 +223,16 @@ export function shiftByWeekno(
     );
   }
 
-  // 0=MO..6=SU; crossing uses the pre-shift weekdays, since it's the original day that moves.
+  // The week boundary follows WKST (default Monday), not always Monday: rrule honours wkst when
+  // expanding BYWEEKNO, so hardcoding MO would compute the wrong crossing under e.g. WKST=SU.
+  const weekStart = wkst == null ? 0 : typeof wkst === 'number' ? wkst : weekdayNum(wkst);
+  const lastDayOfWeek = (weekStart + 6) % 7;
+
+  // Crossing uses the pre-shift weekdays, since it's the original day that moves.
   const crossings = new Set(
     weekdays.map(weekday => {
       const num = weekdayNum(weekday);
-      return dayShift === 1 ? (num === 6 ? 1 : 0) : num === 0 ? -1 : 0;
+      return dayShift === 1 ? (num === lastDayOfWeek ? 1 : 0) : num === weekStart ? -1 : 0;
     }),
   );
   if (crossings.size > 1) {
